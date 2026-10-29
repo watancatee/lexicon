@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+AGENT NOTES — IELTS SPACED REPETITION ENGINE (FOUNDATION)
+================================================================================
+PROJECT GOAL:
+A clean, dependency-free, single-user Anki-style SRS web app tailored for IELTS
+preparation (collocations, phrasal verbs, idioms, linking words, grammar, topic
+vocabulary). Built as a modular single-file architecture ready to be split into
+ES modules or expanded by an autonomous coding agent.
+
+SECTION MAP (JavaScript):
+1. CONFIG     - Default SRS constants & daily boundaries.
+2. MODEL      - Factory functions & documented shapes for Card, Deck, ReviewLog.
+3. STORAGE    - Isolated localStorage DAO with error boundary & schema version.
+4. SCHEDULER  - Pure functional SM-2 / Anki state machine (zero side effects).
+5. QUEUE      - Daily study Day-boundary resolver & priority queue builder.
+6. UI         - Minimal DOM state controller, keyboard listeners, flip UI.
+7. SEED       - 12 Band 6.5-7.5 IELTS cards across 3 decks on initial boot.
+8. TESTS      - `runSchedulerTests()` with 8 core invariant assertions.
+
+DATA MODEL SUMMARY:
+- Card: { id, deckId, type, front, back, example, ipa, pos, band, tags, notes,
+          state, ease, interval, step, due, reps, lapses, suspended }
+- Deck: { id, name, description, createdAt }
+- ReviewLog: { id, cardId, deckId, rating, stateBefore, stateAfter,
+               intervalBefore, intervalAfter, easeBefore, easeAfter, reviewedAt }
+
+SCHEDULER RULES (PURE SM-2 VARIANT):
+- Ratings: 1 = Again, 2 = Hard, 3 = Good, 4 = Easy.
+- 'new' / 'learning':
+    - Again (1): step = 0, due = +learningSteps[0] (1m).
+    - Hard (2): repeat current step, due = +learningSteps[step] (or avg of 0 & 1).
+    - Good (3): advance step. If steps exhausted -> graduate ('review', interval = 1d).
+    - Easy (4): immediate graduate ('review', interval = 4d).
+- 'review':
+    - Again (1): state -> 'relearning', step = 0, lapses + 1, ease - 0.20 (min 1.3),
+                 interval = 1d, due = +relearningSteps[0] (10m).
+    - Hard (2): interval = max(interval + 1, round(interval * 1.2)), ease - 0.15 (min 1.3).
+    - Good (3): interval = max(interval + 1, round(interval * ease)), ease unchanged.
+    - Easy (4): interval = max(interval + 1, round(interval * ease * 1.3)), ease + 0.15.
+- 'relearning':
+    - Again (1): step = 0, due = +relearningSteps[0] (10m).
+    - Hard (2): due = +round(relearningSteps[step] * 1.2).
+    - Good (3): advance step; if done -> 'review' using preserved post-lapse interval.
+    - Easy (4): graduate immediately -> 'review', interval = max(interval + 1, 2d).
+
+STORAGE NOTES:
+- All persistence lives exclusively in Section 3 (`Storage`).
+- Keys: `ielts_cards`, `ielts_decks`, `ielts_log`, `ielts_settings`, `ielts_meta`.
+- Wrapped in try/catch with a visible `#error-banner` hook for QuotaExceededError
+  or JSON corruption.
+
+PRIORITIZED ROADMAP FOR NEXT AGENT:
+1. JSON Backup Export/Import (CRITICAL FIRST: localStorage can be cleared by browser).
+2. Card Browser & CRUD Editor (search, tag filter, suspend/unsuspend, add/edit).
+3. Typed Answers (`type === 'typed'` & `'cloze'` input diffing before flip).
+4. Settings Screen (customize daily limits, learning steps, rollover hour).
+5. Statistics Dashboard (retention rate, future due forecast, band breakdown).
+6. Bulk Add (CSV / TSV / Markdown quick-import parser).
+7. Touch Swipe Gestures (mobile left/right/up/down grading).
+8. PWA (manifest.json + Service Worker for offline reliability).
+9. Accessibility (ARIA live regions for card flips, focus trapping in modals).
+================================================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IELTS Lexicon — Spaced Repetition</title>
+  <!-- EXTENSION POINT: PWA (manifest link & theme-color meta tags) -->
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --surface-alt: #eef1f5;
+      --text: #181c20;
+      --text-muted: #5c6672;
+      --border: #dce1e7;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --again: #dc2626;
+      --hard: #d97706;
+      --good: #16a34a;
+      --easy: #0284c7;
+      --new-badge: #2563eb;
+      --learn-badge: #d97706;
+      --rev-badge: #16a34a;
+      --shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+      --radius: 12px;
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1318;
+        --surface: #181e26;
+        --surface-alt: #222a35;
+        --text: #eceff4;
+        --text-muted: #94a3b8;
+        --border: #2d3748;
+        --accent: #3b82f6;
+        --accent-hover: #60a5fa;
+        --again: #ef4444;
+        --hard: #f59e0b;
+        --good: #22c55e;
+        --easy: #38bdf8;
+        --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+    }
+
+    .app-shell {
+      width: 100%;
+      max-width: 640px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      flex: 1;
+    }
+
+    #error-banner {
+      display: none;
+      background: var(--again);
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 4px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand {
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-tag {
+      font-size: 0.72rem;
+      background: var(--surface-alt);
+      color: var(--text-muted);
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }
+
+    .nav-btn {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .nav-btn:hover { background: var(--surface-alt); }
+    .hidden { display: none !important; }
+
+    /* DECK LIST VIEW */
+    .deck-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .deck-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .deck-info h2 {
+      font-size: 1.05rem;
+      margin-bottom: 4px;
+    }
+
+    .deck-info p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+
+    .counts {
+      display: flex;
+      gap: 12px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-family: var(--font-mono);
+    }
+
+    .c-new { color: var(--new-badge); }
+    .c-learn { color: var(--learn-badge); }
+    .c-rev { color: var(--rev-badge); }
+
+    .primary-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+
+    .primary-btn:hover { background: var(--accent-hover); }
+
+    /* STUDY SCREEN */
+    .study-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: var(--radius);
+      font-size: 0.88rem;
+    }
+
+    .deck-title-active {
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .card-stage {
+      perspective: 1200px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 330px;
+    }
+
+    .flashcard {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+      transform-style: preserve-3d;
+    }
+
+    .flashcard.is-flipped {
+      animation: flipPulse 0.26s ease-out;
+    }
+
+    @keyframes flipPulse {
+      0% { transform: rotateX(0deg) scale(1); }
+      45% { transform: rotateX(8deg) scale(0.985); }
+      100% { transform: rotateX(0deg) scale(1); }
+    }
+
+    .card-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: var(--surface-alt);
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .badge-band {
+      color: var(--accent);
+      border: 1px solid var(--border);
+    }
+
+    .card-front {
+      margin: auto 0;
+      text-align: center;
+      padding: 16px 0;
+    }
+
+    .prompt-term {
+      font-size: 1.55rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 6px;
+    }
+
+    .prompt-ipa {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .card-back {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px dashed var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      animation: fadeIn 0.2s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .meaning {
+      font-size: 1.1rem;
+      font-weight: 500;
+    }
+
+    .example-box {
+      background: var(--surface-alt);
+      border-left: 3px solid var(--accent);
+      padding: 10px 14px;
+      border-radius: 0 8px 8px 0;
+      font-size: 0.92rem;
+      font-style: italic;
+    }
+
+    .notes-line {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .tag-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .tag {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      background: var(--surface-alt);
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* ACTION CONTROLS */
+    .controls-area {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+    }
+
+    .show-btn {
+      width: 100%;
+      padding: 15px;
+      font-size: 1rem;
+      font-weight: 600;
+      border-radius: var(--radius);
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .show-btn:hover { background: var(--accent-hover); }
+
+    .rating-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .rate-btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top-width: 3px;
+      border-radius: 10px;
+      padding: 10px 6px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      color: var(--text);
+      transition: transform 0.1s, background 0.15s;
+    }
+
+    .rate-btn:hover { background: var(--surface-alt); }
+    .rate-btn:active { transform: scale(0.97); }
+
+    .rate-btn[data-rate="1"] { border-top-color: var(--again); }
+    .rate-btn[data-rate="2"] { border-top-color: var(--hard); }
+    .rate-btn[data-rate="3"] { border-top-color: var(--good); }
+    .rate-btn[data-rate="4"] { border-top-color: var(--easy); }
+
+    .rate-ivl {
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+    }
+
+    .rate-label {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .rate-key {
+      font-size: 0.68rem;
+      color: var(--text-muted);
+    }
+
+    .empty-state {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px 24px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .empty-state h3 { font-size: 1.25rem; }
+    .empty-state p { color: var(--text-muted); font-size: 0.92rem; max-width: 360px; }
+
+    footer {
+      text-align: center;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      padding: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div id="error-banner" role="alert"></div>
+
+    <header>
+      <div class="brand">
+        <span>IELTS Lexicon</span>
+        <span class="brand-tag">SRS Core</span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <!-- EXTENSION POINT: card browser button -->
+        <!-- EXTENSION POINT: statistics button -->
+        <!-- EXTENSION POINT: JSON backup export/import button -->
+        <!-- EXTENSION POINT: settings screen button -->
+        <button id="btn-back-decks" class="nav-btn hidden">← All Decks</button>
+      </div>
+    </header>
+
+    <!-- DECK SELECTION SCREEN -->
+    <main id="screen-decks">
+      <div id="deck-list" class="deck-list"></div>
+    </main>
+
+    <!-- STUDY SCREEN -->
+    <main id="screen-study" class="hidden" style="display: flex; flex-direction: column; gap: 14px; flex: 1;">
+      <div class="study-bar">
+        <span id="study-deck-name" class="deck-title-active">Deck</span>
+        <div class="counts">
+          <span class="c-new" title="New cards">New: <b id="cnt-new">0</b></span>
+          <span class="c-learn" title="Learning / Relearning">Learn: <b id="cnt-learn">0</b></span>
+          <span class="c-rev" title="Review due">Due: <b id="cnt-rev">0</b></span>
+        </div>
+      </div>
+
+      <div id="study-card-area" class="card-stage">
+        <div id="flashcard" class="flashcard">
+          <div>
+            <div class="card-meta">
+              <span id="card-pos" class="badge">collocation</span>
+              <span id="card-band" class="badge badge-band">Band 7.5</span>
+            </div>
+            <div class="card-front">
+              <div id="card-front-text" class="prompt-term"></div>
+              <div id="card-ipa" class="prompt-ipa"></div>
+              <!-- EXTENSION POINT: typed answers (input field before reveal) -->
+            </div>
+          </div>
+
+          <div id="card-back-area" class="card-back hidden">
+            <div id="card-back-text" class="meaning"></div>
+            <div id="card-example" class="example-box"></div>
+            <div id="card-notes" class="notes-line"></div>
+            <div id="card-tags" class="tag-row"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="study-controls" class="controls-area">
+        <button id="btn-show-answer" class="show-btn">Show Answer (Space)</button>
+        <div id="rating-buttons" class="rating-grid hidden">
+          <button class="rate-btn" data-rate="1">
+            <span id="ivl-1" class="rate-ivl">1m</span>
+            <span class="rate-label">Again</span>
+            <span class="rate-key">[1]</span>
+          </button>
+          <button class="rate-btn" data-rate="2">
+            <span id="ivl-2" class="rate-ivl">6m</span>
+            <span class="rate-label">Hard</span>
+            <span class="rate-key">[2]</span>
+          </button>
+          <button class="rate-btn" data-rate="3">
+            <span id="ivl-3" class="rate-ivl">10m</span>
+            <span class="rate-label">Good</span>
+            <span class="rate-key">[3]</span>
+          </button>
+          <button class="rate-btn" data-rate="4">
+            <span id="ivl-4" class="rate-ivl">4d</span>
+            <span class="rate-label">Easy</span>
+            <span class="rate-key">[4]</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="study-done" class="empty-state hidden">
+        <h3>Done for today!</h3>
+        <p>You have completed all queued cards in this deck for the current study day.</p>
+        <button id="btn-done-return" class="primary-btn">Back to Decks</button>
+      </div>
+    </main>
+
+    <footer>
+      Shortcuts: <b>Space</b> to flip &bull; <b>1–4</b> to grade &bull; Console: <code>runSchedulerTests()</code>
+    </footer>
+  </div>
+
+  <script>
+    "use strict";
+
+    /* ==========================================================================
+       1. CONFIG
+       ========================================================================== */
+    const DEFAULT_SETTINGS = Object.freeze({
+      newCardsPerDay: 20,
+      maxReviewsPerDay: 200,
+      learningSteps: [1, 10],     // in minutes
+      relearningSteps: [10],      // in minutes
+      graduatingInterval: 1,      // in days
+      easyInterval: 4,            // in days
+      dayRolloverHour: 4          // 4:00 AM local time
+    });
+
+    const MIN_EASE = 1.3;
+    const SCHEMA_VERSION = 1;
+    const MINUTE_MS = 60 * 1000;
+    const DAY_MS = 24 * 60 * MINUTE_MS;
+
+    /* ==========================================================================
+       2. MODEL
+       ========================================================================== */
+    /**
+     * Card Shape:
+     * @typedef {Object} Card
+     * @property {string} id
+     * @property {string} deckId
+     * @property {'basic'|'reversed'|'cloze'|'typed'} type
+     * @property {string} front
+     * @property {string} back
+     * @property {string} example
+     * @property {string} ipa
+     * @property {string} pos          - Part of speech / category label
+     * @property {'5.5'|'6.5'|'7.5'} band
+     * @property {string[]} tags
+     * @property {string} notes
+     * @property {'new'|'learning'|'review'|'relearning'} state
+     * @property {number} ease         - Default 2.5
+     * @property {number} interval     - In days (0 while in initial learning)
+     * @property {number} step         - Current learning/relearning step index
+     * @property {number} due          - Epoch timestamp (ms)
+     * @property {number} reps         - Total reviews count
+     * @property {number} lapses       - Times forgotten from 'review'
+     * @property {boolean} suspended
+     */
+    function createCard(fields) {
+      const now = Date.now();
+      return {
+        id: fields.id || "card_" + now + "_" + Math.random().toString(36).slice(2, 7),
+        deckId: fields.deckId,
+        type: fields.type || "basic",
+        front: fields.front || "",
+        back: fields.back || "",
+        example: fields.example || "",
+        ipa: fields.ipa || "",
+        pos: fields.pos || "vocabulary",
+        band: fields.band || "6.5",
+        tags: Array.isArray(fields.tags) ? [...fields.tags] : [],
+        notes: fields.notes || "",
+        state: fields.state || "new",
+        ease: typeof fields.ease === "number" ? fields.ease : 2.5,
+        interval: typeof fields.interval === "number" ? fields.interval : 0,
+        step: typeof fields.step === "number" ? fields.step : 0,
+        due: typeof fields.due === "number" ? fields.due : now,
+        reps: typeof fields.reps === "number" ? fields.reps : 0,
+        lapses: typeof fields.lapses === "number" ? fields.lapses : 0,
+        suspended: Boolean(fields.suspended)
+      };
+    }
+
+    /**
+     * Deck Shape:
+     * @typedef {Object} Deck
+     * @property {string} id
+     * @property {string} name
+     * @property {string} description
+     * @property {number} createdAt
+     */
+    function createDeck(fields) {
+      return {
+        id: fields.id || "deck_" + Date.now(),
+        name: fields.name || "Untitled Deck",
+        description: fields.description || "",
+        createdAt: fields.createdAt || Date.now()
+      };
+    }
+
+    /**
+     * ReviewLog Shape:
+     * @typedef {Object} ReviewLog
+     * @property {string} id
+     * @property {string} cardId
+     * @property {string} deckId
+     * @property {1|2|3|4} rating
+     * @property {string} stateBefore
+     * @property {string} stateAfter
+     * @property {number} intervalBefore
+     * @property {number} intervalAfter
+     * @property {number} easeBefore
+     * @property {number} easeAfter
+     * @property {number} reviewedAt
+     */
+    function createReviewLog(entry) {
+      return {
+        id: "log_" + entry.reviewedAt + "_" + Math.random().toString(36).slice(2, 7),
+        cardId: entry.cardId,
+        deckId: entry.deckId,
+        rating: entry.rating,
+        stateBefore: entry.stateBefore,
+        stateAfter: entry.stateAfter,
+        intervalBefore: entry.intervalBefore,
+        intervalAfter: entry.intervalAfter,
+        easeBefore: entry.easeBefore,
+        easeAfter: entry.easeAfter,
+        reviewedAt: entry.reviewedAt
+      };
+    }
+
+    /* ==========================================================================
+       3. STORAGE
+       ========================================================================== */
+    const STORAGE_KEYS = Object.freeze({
+      CARDS: "ielts_cards",
+      DECKS: "ielts_decks",
+      LOG: "ielts_log",
+      SETTINGS: "ielts_settings",
+      META: "ielts_meta"
+    });
+
+    const Storage = {
+      _reportError(message, err) {
+        console.error("[Storage Error]", message, err);
+        const banner = document.getElementById("error-banner");
+        if (banner) {
+          banner.textContent = message;
+          banner.style.display = "block";
+        }
+      },
+
+      load(key, fallback = null) {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw === null) return fallback;
+          return JSON.parse(raw);
+        } catch (err) {
+          this._reportError(
+            `Storage read error for "${key}". Stored JSON may be corrupted.`,
+            err
+          );
+          return fallback;
+        }
+      },
+
+      save(key, value) {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+          return true;
+        } catch (err) {
+          this._reportError(
+            `Failed to save data to "${key}" (Storage quota exceeded or disabled).`,
+            err
+          );
+          return false;
+        }
+      },
+
+      getCards() {
+        return this.load(STORAGE_KEYS.CARDS, []);
+      },
+
+      getCardById(id) {
+        const cards = this.getCards();
+        return cards.find((c) => c.id === id) || null;
+      },
+
+      putCard(card) {
+        const cards = this.getCards();
+        const idx = cards.findIndex((c) => c.id === card.id);
+        if (idx >= 0) {
+          cards[idx] = card;
+        } else {
+          cards.push(card);
+        }
+        return this.save(STORAGE_KEYS.CARDS, cards);
+      },
+
+      deleteCardById(id) {
+        const cards = this.getCards().filter((c) => c.id !== id);
+        return this.save(STORAGE_KEYS.CARDS, cards);
+      },
+
+      getDecks() {
+        return this.load(STORAGE_KEYS.DECKS, []);
+      },
+
+      getLogs() {
+        return this.load(STORAGE_KEYS.LOG, []);
+      },
+
+      appendLog(logEntry) {
+        const logs = this.getLogs();
+        logs.push(logEntry);
+        return this.save(STORAGE_KEYS.LOG, logs);
+      },
+
+      getSettings() {
+        const saved = this.load(STORAGE_KEYS.SETTINGS, null);
+        return { ...DEFAULT_SETTINGS, ...(saved || {}) };
+      }
+    };
+
+    /* ==========================================================================
+       4. SCHEDULER (PURE FUNCTIONS — NO DOM, NO STORAGE)
+       ========================================================================== */
+    function clampEase(ease) {
+      return Math.round(Math.max(MIN_EASE, ease) * 100) / 100;
+    }
+
+    function formatIntervalLabel(msDelta) {
+      const minutes = Math.round(msDelta / MINUTE_MS);
+      if (minutes < 60) {
+        return `${Math.max(1, minutes)}m`;
+      }
+      const days = Math.round(msDelta / DAY_MS);
+      return `${Math.max(1, days)}d`;
+    }
+
+    /**
+     * Pure SM-2 / Anki transition function.
+     * @param {Card} card
+     * @param {1|2|3|4} rating - 1:Again, 2:Hard, 3:Good, 4:Easy
+     * @param {number} now     - Current epoch ms
+     * @param {Object} settings
+     * @returns {{ card: Card, log: ReviewLog }}
+     */
+    function answerCard(card, rating, now = Date.now(), settings = DEFAULT_SETTINGS) {
+      const cfg = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+      const learnSteps = cfg.learningSteps.length ? cfg.learningSteps : [1, 10];
+      const relearnSteps = cfg.relearningSteps.length ? cfg.relearningSteps : [10];
+
+      const next = {
+        ...card,
+        tags: Array.isArray(card.tags) ? [...card.tags] : [],
+        reps: (card.reps || 0) + 1
+      };
+
+      if (card.state === "new" || card.state === "learning") {
+        const curStep = card.state === "new" ? 0 : card.step;
+
+        if (rating === 1) {
+          next.state = "learning";
+          next.step = 0;
+          next.due = now + learnSteps[0] * MINUTE_MS;
+        } else if (rating === 2) {
+          next.state = "learning";
+          next.step = curStep;
+          let hardMins;
+          if (curStep === 0 && learnSteps.length >= 2) {
+            hardMins = Math.round((learnSteps[0] + learnSteps[1]) / 2);
+          } else {
+            hardMins = learnSteps[Math.min(curStep, learnSteps.length - 1)];
+          }
+          next.due = now + hardMins * MINUTE_MS;
+        } else if (rating === 3) {
+          const nextStep = curStep + 1;
+          if (nextStep < learnSteps.length) {
+            next.state = "learning";
+            next.step = nextStep;
+            next.due = now + learnSteps[nextStep] * MINUTE_MS;
+          } else {
+            next.state = "review";
+            next.step = 0;
+            next.interval = cfg.graduatingInterval;
+            next.due = now + next.interval * DAY_MS;
+          }
+        } else if (rating === 4) {
+          next.state = "review";
+          next.step = 0;
+          next.interval = cfg.easyInterval;
+          next.due = now + next.interval * DAY_MS;
+        }
+      } else if (card.state === "review") {
+        const curIvl = Math.max(1, card.interval || 1);
+
+        if (rating === 1) {
+          next.state = "relearning";
+          next.step = 0;
+          next.lapses = (card.lapses || 0) + 1;
+          next.ease = clampEase(card.ease - 0.20);
+          next.interval = 1;
+          next.due = now + relearnSteps[0] * MINUTE_MS;
+        } else if (rating === 2) {
+          next.state = "review";
+          next.ease = clampEase(card.ease - 0.15);
+          next.interval = Math.max(curIvl + 1, Math.round(curIvl * 1.2));
+          next.due = now + next.interval * DAY_MS;
+        } else if (rating === 3) {
+          next.state = "review";
+          next.interval = Math.max(curIvl + 1, Math.round(curIvl * card.ease));
+          next.due = now + next.interval * DAY_MS;
+        } else if (rating === 4) {
+          next.state = "review";
+          next.ease = clampEase(card.ease + 0.15);
+          next.interval = Math.max(curIvl + 1, Math.round(curIvl * card.ease * 1.3));
+          next.due = now + next.interval * DAY_MS;
+        }
+      } else if (card.state === "relearning") {
+        const curStep = card.step || 0;
+        const stepMins = relearnSteps[Math.min(curStep, relearnSteps.length - 1)];
+
+        if (rating === 1) {
+          next.state = "relearning";
+          next.step = 0;
+          next.due = now + relearnSteps[0] * MINUTE_MS;
+        } else if (rating === 2) {
+          next.state = "relearning";
+          next.step = curStep;
+          next.due = now + Math.max(1, Math.round(stepMins * 1.2)) * MINUTE_MS;
+        } else if (rating === 3) {
+          const nextStep = curStep + 1;
+          if (nextStep < relearnSteps.length) {
+            next.state = "relearning";
+            next.step = nextStep;
+            next.due = now + relearnSteps[nextStep] * MINUTE_MS;
+          } else {
+            next.state = "review";
+            next.step = 0;
+            next.interval = Math.max(1, card.interval || 1);
+            next.due = now + next.interval * DAY_MS;
+          }
+        } else if (rating === 4) {
+          next.state = "review";
+          next.step = 0;
+          next.interval = Math.max((card.interval || 1) + 1, 2);
+          next.due = now + next.interval * DAY_MS;
+        }
+      }
+
+      const log = createReviewLog({
+        cardId: card.id,
+        deckId: card.deckId,
+        rating,
+        stateBefore: card.state,
+        stateAfter: next.state,
+        intervalBefore: card.interval,
+        intervalAfter: next.interval,
+        easeBefore: card.ease,
+        easeAfter: next.ease,
+        reviewedAt: now
+      });
+
+      return { card: next, log };
+    }
+
+    /**
+     * Pure interval previewer returning labels for buttons 1..4.
+     * @param {Card} card
+     * @param {Object} settings
+     * @returns {{ 1: string, 2: string, 3: string, 4: string }}
+     */
+    function previewIntervals(card, settings = DEFAULT_SETTINGS) {
+      const refNow = 1700000000000;
+      const out = {};
+      for (const r of [1, 2, 3, 4]) {
+        const res = answerCard(card, r, refNow, settings);
+        out[r] = formatIntervalLabel(res.card.due - refNow);
+      }
+      return out;
+    }
+
+    /* ==========================================================================
+       5. QUEUE
+       ========================================================================== */
+    function getStudyDayStart(now, rolloverHour = 4) {
+      const d = new Date(now);
+      if (d.getHours() < rolloverHour) {
+        d.setDate(d.getDate() - 1);
+      }
+      d.setHours(rolloverHour, 0, 0, 0);
+      return d.getTime();
+    }
+
+    function buildStudyQueue(deckId, allCards, allLogs, settings, now = Date.now()) {
+      const dayStart = getStudyDayStart(now, settings.dayRolloverHour);
+      const deckLogsToday = allLogs.filter(
+        (l) => l.deckId === deckId && l.reviewedAt >= dayStart
+      );
+
+      const newStudiedIds = new Set(
+        deckLogsToday.filter((l) => l.stateBefore === "new").map((l) => l.cardId)
+      );
+      const reviewStudiedIds = new Set(
+        deckLogsToday.filter((l) => l.stateBefore === "review").map((l) => l.cardId)
+      );
+
+      const remainingNewLimit = Math.max(0, settings.newCardsPerDay - newStudiedIds.size);
+      const remainingReviewLimit = Math.max(0, settings.maxReviewsPerDay - reviewStudiedIds.size);
+
+      const activeCards = allCards.filter((c) => c.deckId === deckId && !c.suspended);
+
+      // 1. Due Learning / Relearning (never capped by daily limits)
+      const learningDue = activeCards
+        .filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now)
+        .sort((a, b) => a.due - b.due);
+
+      // 2. Due Reviews (capped by daily review limit)
+      const reviewsDue = activeCards
+        .filter((c) => c.state === "review" && c.due <= now)
+        .sort((a, b) => a.due - b.due)
+        .slice(0, remainingReviewLimit);
+
+      // 3. New Cards (capped by daily new limit)
+      const newCards = activeCards
+        .filter((c) => c.state === "new")
+        .sort((a, b) => a.due - b.due)
+        .slice(0, remainingNewLimit);
+
+      return {
+        queue: [...learningDue, ...reviewsDue, ...newCards],
+        counts: {
+          newCount: newCards.length,
+          learnCount: learningDue.length,
+          reviewCount: reviewsDue.length
+        }
+      };
+    }
+
+    /* ==========================================================================
+       6. UI
+       ========================================================================== */
+    const UI = {
+      activeDeckId: null,
+      currentCard: null,
+      isAnswerShown: false,
+
+      init() {
+        document.getElementById("btn-back-decks").addEventListener("click", () => this.showDecksScreen());
+        document.getElementById("btn-done-return").addEventListener("click", () => this.showDecksScreen());
+        document.getElementById("btn-show-answer").addEventListener("click", () => this.revealAnswer());
+
+        document.querySelectorAll(".rate-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const rating = Number(btn.getAttribute("data-rate"));
+            this.submitRating(rating);
+          });
+        });
+
+        window.addEventListener("keydown", (e) => {
+          if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+          if (!this.activeDeckId || !this.currentCard) return;
+
+          if (e.code === "Space") {
+            e.preventDefault();
+            if (!this.isAnswerShown) this.revealAnswer();
+          } else if (this.isAnswerShown && ["1", "2", "3", "4"].includes(e.key)) {
+            e.preventDefault();
+            this.submitRating(Number(e.key));
+          }
+        });
+
+        this.renderDecks();
+      },
+
+      showDecksScreen() {
+        this.activeDeckId = null;
+        this.currentCard = null;
+        this.isAnswerShown = false;
+        document.getElementById("screen-study").classList.add("hidden");
+        document.getElementById("btn-back-decks").classList.add("hidden");
+        document.getElementById("screen-decks").classList.remove("hidden");
+        this.renderDecks();
+      },
+
+      renderDecks() {
+        const container = document.getElementById("deck-list");
+        container.innerHTML = "";
+        const decks = Storage.getDecks();
+        const cards = Storage.getCards();
+        const logs = Storage.getLogs();
+        const settings = Storage.getSettings();
+        const now = Date.now();
+
+        decks.forEach((deck) => {
+          const { counts } = buildStudyQueue(deck.id, cards, logs, settings, now);
+          const row = document.createElement("div");
+          row.className = "deck-card";
+          row.innerHTML = `
+            <div class="deck-info">
+              <h2>${this.escape(deck.name)}</h2>
+              <p>${this.escape(deck.description)}</p>
+              <div class="counts">
+                <span class="c-new">New: ${counts.newCount}</span>
+                <span class="c-learn">Learn: ${counts.learnCount}</span>
+                <span class="c-rev">Due: ${counts.reviewCount}</span>
+              </div>
+            </div>
+            <button class="primary-btn" data-deck="${deck.id}">Study</button>
+          `;
+          row.querySelector("button").addEventListener("click", () => this.startStudy(deck.id));
+          container.appendChild(row);
+        });
+      },
+
+      startStudy(deckId) {
+        this.activeDeckId = deckId;
+        const deck = Storage.getDecks().find((d) => d.id === deckId);
+        document.getElementById("study-deck-name").textContent = deck ? deck.name : "Study";
+        document.getElementById("screen-decks").classList.add("hidden");
+        document.getElementById("screen-study").classList.remove("hidden");
+        document.getElementById("btn-back-decks").classList.remove("hidden");
+        this.loadNextCard();
+      },
+
+      loadNextCard() {
+        const cards = Storage.getCards();
+        const logs = Storage.getLogs();
+        const settings = Storage.getSettings();
+        const { queue, counts } = buildStudyQueue(this.activeDeckId, cards, logs, settings, Date.now());
+
+        document.getElementById("cnt-new").textContent = counts.newCount;
+        document.getElementById("cnt-learn").textContent = counts.learnCount;
+        document.getElementById("cnt-rev").textContent = counts.reviewCount;
+
+        const cardArea = document.getElementById("study-card-area");
+        const controlsArea = document.getElementById("study-controls");
+        const doneArea = document.getElementById("study-done");
+
+        if (queue.length === 0) {
+          this.currentCard = null;
+          cardArea.classList.add("hidden");
+          controlsArea.classList.add("hidden");
+          doneArea.classList.remove("hidden");
+          return;
+        }
+
+        cardArea.classList.remove("hidden");
+        controlsArea.classList.remove("hidden");
+        doneArea.classList.add("hidden");
+
+        this.currentCard = queue[0];
+        this.isAnswerShown = false;
+
+        const flashcardEl = document.getElementById("flashcard");
+        flashcardEl.classList.remove("is-flipped");
+
+        document.getElementById("card-pos").textContent = this.currentCard.pos;
+        document.getElementById("card-band").textContent = `Band ${this.currentCard.band}`;
+        document.getElementById("card-front-text").textContent = this.currentCard.front;
+        document.getElementById("card-ipa").textContent = this.currentCard.ipa;
+
+        document.getElementById("card-back-area").classList.add("hidden");
+        document.getElementById("btn-show-answer").classList.remove("hidden");
+        document.getElementById("rating-buttons").classList.add("hidden");
+      },
+
+      revealAnswer() {
+        if (!this.currentCard || this.isAnswerShown) return;
+        this.isAnswerShown = true;
+
+        const flashcardEl = document.getElementById("flashcard");
+        flashcardEl.classList.add("is-flipped");
+
+        document.getElementById("card-back-text").textContent = this.currentCard.back;
+        document.getElementById("card-example").textContent = `"${this.currentCard.example}"`;
+        document.getElementById("card-notes").textContent = this.currentCard.notes;
+
+        const tagsContainer = document.getElementById("card-tags");
+        tagsContainer.innerHTML = "";
+        this.currentCard.tags.forEach((t) => {
+          const span = document.createElement("span");
+          span.className = "tag";
+          span.textContent = `#${t}`;
+          tagsContainer.appendChild(span);
+        });
+
+        const settings = Storage.getSettings();
+        const previews = previewIntervals(this.currentCard, settings);
+        for (const r of [1, 2, 3, 4]) {
+          document.getElementById(`ivl-${r}`).textContent = previews[r];
+        }
+
+        document.getElementById("card-back-area").classList.remove("hidden");
+        document.getElementById("btn-show-answer").classList.add("hidden");
+        document.getElementById("rating-buttons").classList.remove("hidden");
+      },
+
+      submitRating(rating) {
+        if (!this.currentCard || !this.isAnswerShown) return;
+        const settings = Storage.getSettings();
+        const { card: updatedCard, log } = answerCard(this.currentCard, rating, Date.now(), settings);
+        Storage.putCard(updatedCard);
+        Storage.appendLog(log);
+        this.loadNextCard();
+      },
+
+      escape(str) {
+        const div = document.createElement("div");
+        div.textContent = str || "";
+        return div.innerHTML;
+      }
+    };
+
+    /* ==========================================================================
+       7. SEED (12 HIGH-QUALITY IELTS STARTER CARDS IN 3 DECKS)
+       ========================================================================== */
+    function seedInitialDataIfNeeded() {
+      const meta = Storage.load(STORAGE_KEYS.META, null);
+      if (meta && meta.seeded) return;
+
+      const decks = [
+        createDeck({
+          id: "deck_collocations",
+          name: "1. Academic Collocations & Phrasal Verbs",
+          description: "High-impact verb-noun collocations & phrasal verbs for Writing Task 2."
+        }),
+        createDeck({
+          id: "deck_cohesion",
+          name: "2. Discourse Markers & Linking Words",
+          description: "Cohesive devices & idiomatic expressions for Coherence and Speaking."
+        }),
+        createDeck({
+          id: "deck_topic_vocab",
+          name: "3. Topic Vocabulary & Complex Grammar",
+          description: "Environment, urbanization, and Band 7.5+ grammatical structures."
+        })
+      ];
+
+      const rawCards = [
+        // Deck 1: Collocations & Phrasal Verbs
+        {
+          id: "c_1", deckId: "deck_collocations", pos: "collocation", band: "7.5",
+          front: "exacerbate a problem", ipa: "/ɪɡˈzæs.ə.beɪt/",
+          back: "To make an existing bad situation, issue, or problem significantly worse.",
+          example: "Unregulated industrial emissions continue to exacerbate the problem of urban air pollution.",
+          tags: ["writing-task-2", "environment"], notes: "Formal alternative to 'make worse'."
+        },
+        {
+          id: "c_2", deckId: "deck_collocations", pos: "collocation", band: "7.5",
+          front: "mitigate the impact of", ipa: "/ˈmɪt.ɪ.ɡeɪt/",
+          back: "To make the harmful effects of something less severe, serious, or painful.",
+          example: "Governments must invest in public transit to mitigate the impact of traffic congestion.",
+          tags: ["writing-task-2", "solutions"], notes: "Often pairs with 'effects', 'risks', or 'impact'."
+        },
+        {
+          id: "c_3", deckId: "deck_collocations", pos: "phrasal verb", band: "6.5",
+          front: "bring about", ipa: "/brɪŋ əˈbaʊt/",
+          back: "To cause something to happen, especially a major social or policy change.",
+          example: "The proliferation of remote work has brought about a fundamental shift in urban housing demand.",
+          tags: ["causation", "phrasal-verb"], notes: "Transitive; separable only with pronouns."
+        },
+        {
+          id: "c_4", deckId: "deck_collocations", pos: "phrasal verb", band: "7.5",
+          front: "stem from", ipa: "/stem frɒm/",
+          back: "To originate in or be caused by a particular situation, event, or factor.",
+          example: "Much of the rise in childhood obesity stems from sedentary lifestyles and ultra-processed diets.",
+          tags: ["causation", "academic"], notes: "Not used in continuous tenses."
+        },
+        // Deck 2: Discourse Markers & Idioms
+        {
+          id: "c_5", deckId: "deck_cohesion", pos: "linking phrase", band: "7.5",
+          front: "Albeit", ipa: "/ɔːlˈbiː.ɪt/",
+          back: "Although; even though (used to introduce a concessive adjective, adverb, or phrase).",
+          example: "The government introduced renewable energy subsidies, albeit on a relatively modest scale.",
+          tags: ["cohesion", "concession"], notes: "Followed by a phrase or adjective, not a full finite clause."
+        },
+        {
+          id: "c_6", deckId: "deck_cohesion", pos: "linking word", band: "7.5",
+          front: "Notwithstanding", ipa: "/ˌnɒt.wɪðˈstæn.dɪŋ/",
+          back: "In spite of; despite the fact or thing mentioned.",
+          example: "Notwithstanding the initial economic costs, transitioning to green energy is indispensable.",
+          tags: ["cohesion", "formal"], notes: "Can be used before or after the noun phrase."
+        },
+        {
+          id: "c_7", deckId: "deck_cohesion", pos: "idiom", band: "7.5",
+          front: "a double-edged sword", ipa: "/ə ˌdʌb.əl.edʒd ˈsɔːd/",
+          back: "Something that has or can have both favorable and unfavorable consequences.",
+          example: "Artificial intelligence in education is a double-edged sword, offering personalized learning while risking academic dishonesty.",
+          tags: ["speaking-part-3", "idiom"], notes: "Great for balanced thesis statements."
+        },
+        {
+          id: "c_8", deckId: "deck_cohesion", pos: "idiom", band: "6.5",
+          front: "part and parcel of", ipa: "/pɑːt ænd ˈpɑː.səl ɒv/",
+          back: "An essential or unavoidable feature of an experience or process.",
+          example: "Experiencing occasional culture shock is part and parcel of studying abroad.",
+          tags: ["speaking", "idiom"], notes: "Singular uncountable phrase."
+        },
+        // Deck 3: Topic Vocabulary & Grammar
+        {
+          id: "c_9", deckId: "deck_topic_vocab", pos: "topic vocabulary", band: "7.5",
+          front: "planned obsolescence", ipa: "/plænd ˌɒb.səlˈes.əns/",
+          back: "A policy of producing consumer goods that rapidly become obsolete and require replacing.",
+          example: "Smartphone manufacturers are frequently criticized for practicing planned obsolescence.",
+          tags: ["consumerism", "environment"], notes: "High-scoring noun phrase for technology/waste essays."
+        },
+        {
+          id: "c_10", deckId: "deck_topic_vocab", pos: "topic vocabulary", band: "6.5",
+          front: "urban sprawl", ipa: "/ˌɜː.bən ˈsprɔːl/",
+          back: "The uncontrolled expansion of urban areas into the surrounding countryside.",
+          example: "Unchecked urban sprawl destroys natural habitats and lengthens daily commuting times.",
+          tags: ["urbanization", "environment"], notes: "Uncountable noun phrase."
+        },
+        {
+          id: "c_11", deckId: "deck_topic_vocab", pos: "grammar structure", band: "7.5",
+          front: "Negative Inversion: Not only... but also", ipa: "/ɪnˈvɜː.ʃən/",
+          back: "Placing 'Not only' at the start of a sentence triggers auxiliary-subject inversion (Not only + aux + S + V).",
+          example: "Not only does public transport reduce carbon emissions, but it also alleviates road congestion.",
+          tags: ["grammar", "inversion"], notes: "Boosts Grammatical Range and Accuracy (GRA) score."
+        },
+        {
+          id: "c_12", deckId: "deck_topic_vocab", pos: "grammar structure", band: "7.5",
+          front: "Participle Clause: Having + past participle", ipa: "/ˈpɑː.tɪ.sɪ.pəl/",
+          back: "Expresses an action completed prior to the action in the main clause.",
+          example: "Having depleted their domestic fossil fuel reserves, several nations turned to nuclear power.",
+          tags: ["grammar", "complex-sentences"], notes: "Subject of both clauses must be identical."
+        }
+      ];
+
+      const baseTime = Date.now();
+      const cards = rawCards.map((c, index) =>
+        createCard({ ...c, due: baseTime + index })
+      );
+
+      Storage.save(STORAGE_KEYS.DECKS, decks);
+      Storage.save(STORAGE_KEYS.CARDS, cards);
+      Storage.save(STORAGE_KEYS.LOG, []);
+      Storage.save(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+      Storage.save(STORAGE_KEYS.META, { schemaVersion: SCHEMA_VERSION, seeded: true });
+    }
+
+    /* ==========================================================================
+       8. TESTS (8 ASSERTIONS CALLABLE VIA CONSOLE: runSchedulerTests())
+       ========================================================================== */
+    function runSchedulerTests() {
+      const now = 1700000000000;
+      const results = [];
+      const assert = (name, condition, details = "") => {
+        results.push({ test: name, passed: Boolean(condition), details });
+        if (!condition) console.error(`❌ FAIL: ${name}`, details);
+      };
+
+      // 1. Immutability check
+      const c1 = createCard({ id: "t1", deckId: "d1", state: "new", ease: 2.5, step: 0, tags: ["a"] });
+      const snap = JSON.stringify(c1);
+      answerCard(c1, 3, now, DEFAULT_SETTINGS);
+      assert(
+        "1. Immutability: answerCard does not mutate input card",
+        JSON.stringify(c1) === snap
+      );
+
+      // 2. New card -> Good (3) advances to learning step 1 (10m)
+      const r2 = answerCard(c1, 3, now, DEFAULT_SETTINGS).card;
+      assert(
+        "2. New card + Good -> learning step 1 (10m)",
+        r2.state === "learning" && r2.step === 1 && r2.due === now + 10 * MINUTE_MS,
+        `state=${r2.state}, step=${r2.step}`
+      );
+
+      // 3. Learning step 1 -> Good (3) graduates to review (1d)
+      const r3 = answerCard(r2, 3, now, DEFAULT_SETTINGS).card;
+      assert(
+        "3. Final learning step + Good -> graduates to review (1d)",
+        r3.state === "review" && r3.interval === 1 && r3.due === now + 1 * DAY_MS,
+        `state=${r3.state}, ivl=${r3.interval}`
+      );
+
+      // 4. New card -> Easy (4) immediately graduates to 4d
+      const r4 = answerCard(c1, 4, now, DEFAULT_SETTINGS).card;
+      assert(
+        "4. New card + Easy -> immediate review (4d)",
+        r4.state === "review" && r4.interval === 4 && r4.due === now + 4 * DAY_MS
+      );
+
+      // 5. Review card -> Again (1) -> relearning, lapses +1, ease -0.20, 10m step
+      const revCard = createCard({
+        id: "t5", deckId: "d1", state: "review", interval: 10, ease: 2.5, lapses: 0
+      });
+      const r5 = answerCard(revCard, 1, now, DEFAULT_SETTINGS).card;
+      assert(
+        "5. Review + Again -> relearning (10m), ease -0.20, lapses +1",
+        r5.state === "relearning" &&
+          r5.ease === 2.3 &&
+          r5.lapses === 1 &&
+          r5.due === now + 10 * MINUTE_MS,
+        `state=${r5.state}, ease=${r5.ease}, lapses=${r5.lapses}`
+      );
+
+      // 6. Review card -> Hard (2) -> interval * 1.2, ease -0.15
+      const r6 = answerCard(revCard, 2, now, DEFAULT_SETTINGS).card;
+      assert(
+        "6. Review (10d) + Hard -> interval 12d, ease 2.35",
+        r6.state === "review" && r6.interval === 12 && r6.ease === 2.35,
+        `ivl=${r6.interval}, ease=${r6.ease}`
+      );
+
+      // 7. Review card -> Good (3) -> interval * ease, ease unchanged
+      const r7 = answerCard(revCard, 3, now, DEFAULT_SETTINGS).card;
+      assert(
+        "7. Review (10d, ease 2.5) + Good -> interval 25d, ease 2.5",
+        r7.state === "review" && r7.interval === 25 && r7.ease === 2.5,
+        `ivl=${r7.interval}, ease=${r7.ease}`
+      );
+
+      // 8. Review card -> Easy (4) & min ease floor (1.3) check
+      const r8Easy = answerCard(revCard, 4, now, DEFAULT_SETTINGS).card;
+      const lowEaseCard = createCard({
+        id: "t8", deckId: "d1", state: "review", interval: 5, ease: 1.35
+      });
+      const r8Floor = answerCard(lowEaseCard, 1, now, DEFAULT_SETTINGS).card;
+      assert(
+        "8. Review + Easy (ivl*ease*1.3, ease+0.15) & Ease floor clamped at 1.3",
+        r8Easy.interval === 33 && r8Easy.ease === 2.65 && r8Floor.ease === 1.3,
+        `easyIvl=${r8Easy.interval}, easyEase=${r8Easy.ease}, floorEase=${r8Floor.ease}`
+      );
+
+      console.table(results);
+      const passedCount = results.filter((r) => r.passed).length;
+      console.log(`Scheduler Tests: ${passedCount}/${results.length} passed.`);
+      return passedCount === results.length;
+    }
+
+    window.runSchedulerTests = runSchedulerTests;
+
+    /* ==========================================================================
+       BOOTSTRAP
+       ========================================================================== */
+    document.addEventListener("DOMContentLoaded", () => {
+      seedInitialDataIfNeeded();
+      UI.init();
+    });
+  </script>
+</body>
+</html>

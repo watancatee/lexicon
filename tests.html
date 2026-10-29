@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IELTS Lexicon — Automated Test Suite</title>
+  <link rel="stylesheet" href="./styles/tokens.css" />
+  <link rel="stylesheet" href="./styles/base.css" />
+  <style>
+    body {
+      padding: 24px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .test-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .status-badge {
+      font-size: 1.1rem;
+      font-weight: 800;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+    }
+    .status-pass {
+      background: var(--good-bg);
+      color: var(--good);
+      border: 1px solid var(--good);
+    }
+    .status-fail {
+      background: var(--again-bg);
+      color: var(--again);
+      border: 1px solid var(--again);
+    }
+    .test-suite-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: var(--shadow-sm);
+    }
+    .test-suite-card h2 {
+      font-size: 1.15rem;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .test-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+    .test-row:last-child {
+      border-bottom: none;
+    }
+    .test-name {
+      font-weight: 500;
+    }
+    .badge-ok {
+      background: var(--good);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .badge-err {
+      background: var(--again);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .test-details {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="test-header">
+    <div>
+      <h1 style="font-size: 1.6rem; font-weight: 800;">IELTS Lexicon Test Suite</h1>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">Automated invariant assertions across Scheduler, Queue, Cloze, Diff, and Storage.</p>
+    </div>
+    <div id="overall-status" class="status-badge status-pass">Running...</div>
+  </div>
+
+  <div id="file-protocol-warning" class="notification-banner warning hidden" style="margin-bottom: 16px;">
+    ⚠️ <b>Running from file://</b>: Modern browsers block ES Module loading over <code>file://</code> for security. Please run with a local server (e.g. <code>python -m http.server 8000</code>) or host on GitHub Pages as documented in <a href="./README.md">README.md</a>.
+  </div>
+  <script>
+    if (window.location.protocol === "file:") {
+      document.getElementById("file-protocol-warning")?.classList.remove("hidden");
+    }
+  </script>
+
+  <div style="margin-bottom: 16px;">
+    <a href="./index.html" class="btn btn-secondary btn-sm">&larr; Return to Application</a>
+  </div>
+
+  <div id="test-results-container"></div>
+
+  <script type="module">
+    import { runSchedulerTestSuite } from "./tests/scheduler.test.js";
+    import { runQueueTestSuite } from "./tests/queue.test.js";
+    import { runClozeTestSuite } from "./tests/cloze.test.js";
+    import { runDiffTestSuite } from "./tests/diff.test.js";
+    import { runStorageTestSuite } from "./tests/storage.test.js";
+
+    const container = document.getElementById("test-results-container");
+    const overallStatusEl = document.getElementById("overall-status");
+
+    let totalTests = 0;
+    let passedTests = 0;
+
+    /**
+     * Executes a test suite and renders a card.
+     */
+    function executeSuite(suiteName, runnerFn) {
+      const suiteResults = [];
+      const assert = (name, condition, details = "") => {
+        totalTests++;
+        const passed = Boolean(condition);
+        if (passed) passedTests++;
+        suiteResults.push({ name, passed, details });
+        if (!passed) console.error(`[FAIL] ${name}`, details);
+      };
+
+      try {
+        runnerFn(assert);
+      } catch (err) {
+        assert(`Suite Runtime Error in ${suiteName}`, false, String(err));
+      }
+
+      const suitePassed = suiteResults.every((r) => r.passed);
+      const card = document.createElement("div");
+      card.className = "test-suite-card";
+      card.innerHTML = `
+        <h2>
+          <span>${suiteName}</span>
+          <span style="font-size: 0.9rem; color: ${suitePassed ? "var(--good)" : "var(--again)"}; font-weight: 700;">
+            ${suiteResults.filter((r) => r.passed).length}/${suiteResults.length} Passed
+          </span>
+        </h2>
+        <div>
+          ${suiteResults
+            .map(
+              (r) => `
+            <div class="test-row">
+              <div>
+                <div class="test-name">${r.name}</div>
+                ${r.details ? `<div class="test-details">${r.details}</div>` : ""}
+              </div>
+              <span class="${r.passed ? "badge-ok" : "badge-err"}">${r.passed ? "PASS" : "FAIL"}</span>
+            </div>
+          `
+            )
+            .join("")}
+        </div>
+      `;
+
+      container.appendChild(card);
+    }
+
+    // Run all suites
+    executeSuite("1. Pure SM-2 Scheduler Engine", runSchedulerTestSuite);
+    executeSuite("2. Study Day Rollover & Queue Logic", runQueueTestSuite);
+    executeSuite("3. Cloze Deletion Parsing & Generation", runClozeTestSuite);
+    executeSuite("4. Answer Normalization & Character-Level Diff", runDiffTestSuite);
+    executeSuite("5. Storage DAO & JSON Backup / Restore", runStorageTestSuite);
+
+    // Update overall badge
+    if (passedTests === totalTests && totalTests > 0) {
+      overallStatusEl.className = "status-badge status-pass";
+      overallStatusEl.textContent = `All Green: ${passedTests}/${totalTests} Passed`;
+    } else {
+      overallStatusEl.className = "status-badge status-fail";
+      overallStatusEl.textContent = `Failures Detected: ${passedTests}/${totalTests} Passed`;
+    }
+
+    // Expose runSchedulerTests globally for console backward compatibility
+    window.runSchedulerTests = () => {
+      let passed = true;
+      runSchedulerTestSuite((name, cond) => {
+        if (!cond) passed = false;
+      });
+      return passed;
+    };
+  </script>
+</body>
+</html>

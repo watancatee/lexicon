@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="description" content="Personal Anki-style spaced repetition flashcard web application for IELTS academic preparation." />
+  <meta name="theme-color" content="#2563eb" />
+  <title>IELTS Lexicon — Spaced Repetition</title>
+
+  <!-- PWA Manifest & Icons -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="./styles/tokens.css" />
+  <link rel="stylesheet" href="./styles/base.css" />
+  <link rel="stylesheet" href="./styles/components.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Storage Error Banner -->
+    <div id="error-banner" class="notification-banner danger hidden" role="alert"></div>
+
+    <!-- File Protocol Warning Banner -->
+    <div id="file-protocol-banner" class="notification-banner warning hidden" role="alert">
+      <span>⚠️ <b>Running from file://</b>: Browsers block ES Modules on <code>file://</code>. Run a static server like <code>python -m http.server 8000</code> or use Live Server as documented in <a href="./README.md">README.md</a>.</span>
+    </div>
+    <script>
+      if (window.location.protocol === "file:") {
+        document.getElementById("file-protocol-banner")?.classList.remove("hidden");
+      }
+    </script>
+
+    <!-- 7-Day Backup Reminder Banner -->
+    <div id="backup-reminder-banner" class="notification-banner warning hidden" role="status">
+      <span>⚠️ You haven't exported a JSON backup in more than 7 days.</span>
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-banner-export-backup" class="btn btn-sm">Export Now</button>
+        <button id="btn-banner-dismiss-backup" class="btn btn-sm">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- App Header & Main Navigation -->
+    <header class="app-header">
+      <div class="header-top">
+        <a href="#/decks" class="brand" aria-label="IELTS Lexicon Home">
+          <div class="brand-icon">IL</div>
+          <span>IELTS Lexicon</span>
+          <span class="brand-tag">Band 7.5+ SRS</span>
+        </a>
+
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <a href="./tests.html" class="btn btn-secondary btn-sm" title="Open Automated Test Suite">
+            🧪 Tests
+          </a>
+          <a href="#/settings" class="btn btn-secondary btn-sm" aria-label="Settings" title="App Settings">
+            ⚙️
+          </a>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" aria-label="Main Navigation">
+        <a href="#/decks" class="nav-tab active" data-tab="decks">📚 Decks</a>
+        <a href="#/browse" class="nav-tab" data-tab="browse">🔍 Browse</a>
+        <a href="#/add" class="nav-tab" data-tab="add">➕ Add Cards</a>
+        <a href="#/stats" class="nav-tab" data-tab="stats">📊 Statistics</a>
+        <a href="#/settings" class="nav-tab" data-tab="settings">⚙️ Settings</a>
+      </nav>
+    </header>
+
+    <!-- Dynamic View Host -->
+    <main id="app-view"></main>
+
+    <!-- App Footer -->
+    <footer class="app-footer">
+      <div>
+        Shortcuts: <kbd>Space</kbd> flip &bull; <kbd>1</kbd>–<kbd>4</kbd> grade &bull; <kbd>E</kbd> edit &bull; <kbd>S</kbd> suspend &bull; <kbd>B</kbd> bury &bull; <kbd>Z</kbd> undo
+      </div>
+      <div>
+        Built with Pure Vanilla ES Modules &bull; <a href="./tests.html" style="color: inherit; text-decoration: underline;">Test Suite</a>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Main ES Module Application Bootstrap -->
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
